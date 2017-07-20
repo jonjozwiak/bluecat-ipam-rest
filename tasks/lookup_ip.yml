@@ -1,0 +1,155 @@
+---
+# Looks up an IP address from Bluecat Address Manager 
+# based on hostname via REST API 
+
+- name: Lookup | Get API Token (expires 5 minutes by default)
+  uri:
+    url: "{{ bluecat_url }}/Services/REST/v1/login?username={{ bluecat_username }}&password={{ bluecat_password }}"
+    method: GET
+    validate_certs: "{{ validate_certs }}"
+    return_content: yes
+  no_log: true                # Don't show output as your password will be on the URI string
+  register: api_token_output
+
+- name: Lookup | Set fact for Bluecat Token
+  set_fact: 
+    api_token: "{{ api_token_output.content | regex_replace('\"Session Token-> ', '') | regex_replace(' <- for User : .*', '')}}"
+
+- name: Lookup | Get ID of Configuration entity
+  uri:
+    url: "{{ bluecat_url }}/Services/REST/v1/getEntityByName?parentId=0&name={{ bluecat_configuration_name }}&type=Configuration"
+    headers: 
+      Authorization: "{{ api_token }}"
+    method: GET
+    validate_certs: "{{ validate_certs }}"
+    return_content: yes
+  register: config_output
+
+- name: Lookup | Set config fact
+  set_fact:
+    configurationId: "{{ config_output.json.id }}"
+ 
+- name: Lookup | Fail if configuration not found
+  fail:
+    msg: "Configuration ID not found for name <{{ bluecat_configuration_name }}>"
+  when: "configurationId == '0'"
+
+- debug: 
+    msg: "Config ID is {{ configurationId }}"
+
+- name: Lookup | Get ID of your view
+  uri:
+    url: "{{ bluecat_url }}/Services/REST/v1/getEntityByName?parentId={{ configurationId }}&name={{ bluecat_dns_view }}&type=View"
+    headers:
+      Authorization: "{{ api_token }}"
+    method: GET
+    validate_certs: "{{ validate_certs }}"
+    return_content: yes
+  register: view_output
+
+- name: Lookup | Set view fact
+  set_fact:
+    viewId: "{{ view_output.json.id }}"
+
+- name: Lookup | Fail if view not found
+  fail:
+    msg: "View ID not found for name <{{ bluecat_dns_view }}>"
+  when: "viewId == '0'"
+
+- debug:
+    msg: "View ID is {{ viewId }}"
+
+# Using curl as I struggled with hint field in uri
+- name: Lookup | Check if host record already exists
+  command: > 
+    curl -k -H "Authorization: {{ api_token }}" {{ bluecat_url }}/Services/REST/v1/getHostRecordsByHint?containerId={{ viewId }}&start=0&count=1&options="hint=^{{ target_hostname }}$|retrieveFields=false"
+  changed_when: false
+  register: host_record_output
+
+- name: Lookup | Zero out DNS Entry Fact
+  set_fact:
+    dnsId: ""
+
+- name: Lookup | Set DNS Entry Fact
+  set_fact:
+    dnsId: "{{ (host_record_output.stdout | from_json | first).id }}"
+  when: host_record_output.stdout != "[]"
+
+- name: Lookup | Get ID of linked IP address
+  uri:
+    url: "{{ bluecat_url }}/Services/REST/v1/getLinkedEntities?entityId={{ dnsId }}&type=IP4Address&start=0&count=10"
+    headers:
+      Authorization: "{{ api_token }}"
+    method: GET
+    validate_certs: "{{ validate_certs }}"
+    return_content: yes
+  register: linked_ip_output
+
+- name: Lookup | Set Existing IP ID Fact
+  set_fact:
+    ipId: "{{ (linked_ip_output.json | last).id }}"
+
+- name: Lookup | Get IP address record
+  uri:
+    url: "{{ bluecat_url }}/Services/REST/v1/getEntityById?id={{ ipId }}"
+    headers:
+      Authorization: "{{ api_token }}"
+    method: GET
+    validate_certs: "{{ validate_certs }}"
+    return_content: yes
+  register: ip_record_output
+
+# Hacky way to get address from properties="locationInherited=true|address=192.168.30.15|state=STATIC|"
+- name: Lookup | Set IP Address Fact
+  set_fact:
+    ipAddress: "{{ ip_record_output.json.properties | regex_replace('^.*address=', '') | regex_replace('\\|.*', '') }}"
+
+- name: Set the Netmask Fact
+  set_fact:
+    ipNetmask: "{{ bluecat_network_cidr | ipaddr('netmask') }}"
+
+- name: Lookup | Find parent parent network of IP
+  uri:
+    url: "{{ bluecat_url }}/Services/REST/v1/getParent?entityId={{ ipId }}"
+    headers:
+      Authorization: "{{ api_token }}"
+    method: GET
+    validate_certs: "{{ validate_certs }}"
+    return_content: yes
+  register: network_output
+
+- name: Lookup | Set Network Fact
+  set_fact:
+    networkId: "{{ network_output.json.id }}"
+
+- debug:
+    msg: "Network ID is {{ networkId }}"
+
+- name: Lookup | Get Network record
+  uri:
+    url: "{{ bluecat_url }}/Services/REST/v1/getEntityById?id={{ networkId }}"
+    headers:
+      Authorization: "{{ api_token }}"
+    method: GET
+    validate_certs: "{{ validate_certs }}"
+    return_content: yes
+  register: network_record_output
+
+# Hacky way to get address from properties="CIDR=192.168.240.0/24|locationInherited=true|allowDuplicateHost=disable|inheritAllowDuplicateHost=true|pingBeforeAssign=disable|inheritPingBeforeAssign=true|gateway=192.168.240.1|inheritDefaultDomains=true|inheritDefaultView=true|inheritDNSRestrictions=true|"
+- name: Lookup | Set Gateway Fact
+  set_fact:
+    ipGateway: "{{ network_record_output.json.properties | regex_replace('^.*gateway=', '') | regex_replace('\\|.*', '') }}"
+
+- debug:
+    msg: "IP Address ID is <{{ ipId }}>.  Address is <{{ ipAddress }}>.  Hostname is <{{ target_hostname }}>.  Netmask is <{{ ipNetmask }}>.  Gateway is <{{ ipGateway }}>."
+
+- name: Lookup | Logout of API
+  uri:
+    url: "{{ bluecat_url }}/Services/REST/v1/logout"
+    headers:
+      Authorization: "{{ api_token }}"
+    method: GET
+    validate_certs: "{{ validate_certs }}"
+    return_content: yes
+  register: logout_output
+

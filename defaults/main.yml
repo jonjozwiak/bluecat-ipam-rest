@@ -1,0 +1,3 @@
+---
+# defaults file for bluecat-ipam-rest
+state: present

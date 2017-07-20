@@ -1,0 +1,16 @@
+---
+# tasks file for bluecat-ipam-rest
+- name: Acquire IP Address
+  include: acquire_ip.yml
+  when: state == 'present' or state == 'acquire'
+
+- name: Lookup IP Address
+  include: lookup_ip.yml
+  when: state == 'get' or state == 'lookup'
+
+- name: Release IP Address
+  include: release_ip.yml
+  when: state == 'absent' or state == 'release'
+
+
+
